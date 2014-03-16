@@ -4,11 +4,10 @@
 module Main (main) where
 
 import "base"           Control.Monad (when)
-import "base"           Data.Foldable (foldMap)
 import "base"           Data.Functor ((<$>))
-import "base"           Data.List (transpose)
+import "base"           Data.List (intersperse, intercalate, transpose)
 import "base"           Data.Maybe (fromMaybe)
-import "base"           Data.Monoid ((<>), Sum(..))
+import "base"           Data.Monoid (Monoid, (<>), Sum(..), mconcat)
 import "base"           System.IO
                           (BufferMode(NoBuffering),
                            hSetBuffering, hSetEcho,
@@ -27,7 +26,7 @@ import "transformers"   Control.Monad.Trans.Writer
 
 import "lens"     Control.Lens
     (Fold, LensLike', Traversal', Iso', (+~), (.~), (&),
-     asIndex, each, elementOf, foldMapOf, indexing,
+     asIndex, each, elementOf, indexing,
      involuted, makeLenses, only, reversed,
      set, toListOf, view)
 
@@ -48,9 +47,12 @@ cellWidth       = 4
 newElementDistribution :: [Int]
 newElementDistribution = 4 : replicate 9 2
 
+emptyColor     :: Color
+emptyColor      = White
+
 -- Picked looking at http://en.wikipedia.org/wiki/File:Xterm_256color_chart.svg
 palette        :: Int -> Color
-palette    0    = White
+palette    0    = emptyColor
 palette    2    = ColorNumber 190
 palette    4    = ColorNumber 226
 palette    8    = ColorNumber 220
@@ -178,29 +180,57 @@ boardPrinter term = print1
   cls           = require clearScreen
   bg            = require withBackgroundColor
 
+  lineText      = bg emptyColor . termText
+  cellText i xs = bg (palette i) (termText xs)
+
   print1 b      = runTermOutput term
                 $ cls boardSize
-               <> scoreLine b                   <> nl
-               <> foldMapOf (rows.each) drawRow b
-               <> termText "(h) left (l) right" <> nl
+               <> scoreLine b
+               <> sandwich topLine midLine botLine drawRow (view rows b)
+               <> usageText
+
+  -- Metadata
+  scoreLine b   = termText ("Score: " <> show (view score b)
+                                      <> deltaText (view delta b))
+               <> nl
+
+  deltaText 0   = ""
+  deltaText d   = " (+" <> show d <> ")"
+
+  usageText     = termText "(h) left (l) right" <> nl
                <> termText "(j) down (k) up"    <> nl
                <> termText "(q) quit"           <> nl
 
-  drawRow  row  = foldMap drawCell_ row <> nl
-               <> foldMap drawCell  row <> nl
+  -- Row drawing
+  drawRow       = rowAux drawCell_
+               <> rowAux drawCell
 
-  drawCell_ cell = bg (palette cell) (termText (replicate cellWidth ' '))
-  drawCell  cell = bg (palette cell) (termText (pad (cellString cell)))
+  rowAux        = sandwich sideLine innerLine (sideLine <> nl)
+
+  -- Cell drawing
+  drawCell_ cell = cellText cell (replicate cellWidth ' ')
+  drawCell  cell = cellText cell (pad (cellString cell))
 
   cellString 0  = ""
   cellString i  = show i
 
-  pad x         = replicate (cellWidth - length x) ' ' ++ x
+  -- Line drawing
+  sideLine      = lineText "┃"
+  innerLine     = lineText "│"
+  topLine       = horiz '┏' '━' '┯' '┓'
+  midLine       = horiz '┠' '─' '┼' '┨'
+  botLine       = horiz '┗' '━' '┷' '┛'
+  horiz a b c d = lineText
+                $ [a]
+               <> intercalate [c] (replicate boardSize (replicate cellWidth b))
+               <> [d,'\n']
 
-  scoreLine b   = termText ("Score: " ++ show (view score b) ++ deltaText (view delta b))
+  -- Utilities
+  pad x         = replicate (cellWidth - length x) ' ' <> x
 
-  deltaText 0   = ""
-  deltaText d   = " (+" ++ show d ++ ")"
+  sandwich           :: Monoid b => b -> b -> b -> (a -> b) -> [a] -> b
+  sandwich l m r f xs = l <> mconcat (intersperse m (map f xs)) <> r
+
 
 main           :: IO ()
 main            = do hSetBuffering stdin NoBuffering
