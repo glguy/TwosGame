@@ -3,9 +3,10 @@
 {-# LANGUAGE TemplateHaskell #-}
 module Main (main) where
 
+import "base"           Control.Concurrent (threadDelay)
 import "base"           Control.Monad (when)
 import "base"           Data.Functor ((<$>))
-import "base"           Data.List (intersperse, intercalate, transpose)
+import "base"           Data.List (intersperse, intercalate, transpose, unfoldr)
 import "base"           Data.Maybe (fromMaybe)
 import "base"           Data.Monoid (Monoid, (<>), Sum(..), mconcat)
 import "base"           System.IO
@@ -25,7 +26,7 @@ import "transformers"   Control.Monad.IO.Class (MonadIO(liftIO))
 import "transformers"   Control.Monad.Trans.Writer
 
 import "lens"     Control.Lens
-    (Fold, LensLike', Traversal', Iso', (+~), (.~), (&),
+    (Fold, LensLike', Traversal', Iso',
      asIndex, each, elementOf, indexing,
      involuted, makeLenses, only, reversed,
      set, toListOf, view)
@@ -42,6 +43,9 @@ boardSize       = 4
 
 cellWidth      :: Int
 cellWidth       = 4
+
+delay          :: Int
+delay           = 50000
 
 -- 90% chance for 2, 10% for 4
 newElementDistribution :: [Int]
@@ -94,27 +98,6 @@ newGame tiles   = loop tiles Game { _rows = emptyRows, _score = 0, _delta = 0 }
   loop 0 g      = return g
   loop n g      = loop (n-1) =<< addElement g
 
-collapseRow    :: Row -> Writer (Sum Int) Row
-collapseRow     = fmap (take boardSize) . merge . filter (/=0)
-  where
-  merge (x:y:xs) | x == y = do tell (Sum (x*2))
-                               (x*2 :) <$> merge xs
-  merge (x:xs)            = do (x   :) <$> merge xs
-  merge []                = do return (repeat 0)
-
-collapseOf :: LensLike' (Writer (Sum Int)) [Row] Row ->
-              Game -> Game
-collapseOf l b  = b' & score +~ n
-                     & delta .~ n
-  where
-  (b', Sum n)   = runWriter (rows (l collapseRow) b)
-
-collapseUp, collapseDown, collapseLeft, collapseRight :: Game -> Game
-collapseUp      = collapseOf (transposed . each           )
-collapseDown    = collapseOf (transposed . each . reversed)
-collapseLeft    = collapseOf (             each           )
-collapseRight   = collapseOf (             each . reversed)
-
 transposed     :: Iso' [[a]] [[a]]
 transposed      = involuted transpose
 
@@ -129,6 +112,54 @@ addElement b    = do k <- randomElement (toListOf emptyIndexes b)
                      return (set (elementOf cells k) v b)
 
 ------------------------------------------------------------------------
+-- Animated cell collapse logic
+------------------------------------------------------------------------
+
+data Cell = Changed Int | Original Int | Blank deriving (Eq)
+
+toCell                 :: Int -> Cell
+toCell 0                = Blank
+toCell n                = Original n
+
+fromCell               :: Cell -> Int
+fromCell (Changed  x)   = x
+fromCell (Original x)   = x
+fromCell Blank          = 0
+
+-- Monoid meaning: Nothing      - No change
+--                 Just (Sum d) - Change worth d
+collapseRow   :: [Cell] -> Writer (Maybe (Sum Int)) [Cell]
+
+collapseRow (Original x : Original y : xs)
+    | x == y            = do tell (Just (Sum (x*2)))
+                             return (Changed (x*2) : xs ++ [Blank])
+
+collapseRow (Blank : x : xs)
+    | x /= Blank        = do tell (Just (Sum 0))
+                             return (x:xs++[Blank])
+
+collapseRow (x : xs)    = (x :) <$> collapseRow xs
+collapseRow []          = return []
+
+collapseOf :: LensLike' (Writer (Maybe (Sum Int))) [[Cell]] [Cell] -> Game -> [Game]
+collapseOf l b          = unfoldr step (0, map (map toCell) (view rows b))
+  where
+  step (n,rs)           = do let (rs1, mbDelta) = runWriter (l collapseRow rs)
+                             Sum d <- mbDelta
+                             let n1 = n + d
+                                 b1 = Game { _rows  = map (map fromCell) rs1
+                                           , _score = _score b + n1
+                                           , _delta = n1
+                                           }
+                             return (b1,(n1,rs1))
+
+collapseUp, collapseDown, collapseLeft, collapseRight :: Game -> [Game]
+collapseUp     = collapseOf (transposed . each           )
+collapseDown   = collapseOf (transposed . each . reversed)
+collapseLeft   = collapseOf (             each           )
+collapseRight  = collapseOf (             each . reversed)
+
+------------------------------------------------------------------------
 -- Game logic
 ------------------------------------------------------------------------
 
@@ -139,22 +170,27 @@ gameLogic       = construct . loop
   where
   loop b        = do yield b
 
-                     let stuck x = view rows x == view rows b
-                         bl = collapseLeft  b
+                     let bl = collapseLeft  b
                          br = collapseRight b
                          bd = collapseDown  b
                          bu = collapseUp    b
 
-                     when (all stuck [bl, br, bd, bu]) stop
+                     when (all null [bl, br, bd, bu]) stop
 
                      c <- await
-                     let b' = case c of
+                     let bs = case c of
                                 L -> bl
                                 R -> br
                                 D -> bd
                                 U -> bu
 
-                     if stuck b' then loop b else loop =<< addElement b'
+                     if null bs then loop b else slowly bs
+
+  slowly [x]    = loop =<< addElement x
+  slowly (x:xs) = do yield x
+                     liftIO (threadDelay delay)
+                     slowly xs
+  slowly []     = error "slowly: impossible"
 
 ------------------------------------------------------------------------
 -- Run game using terminal sources
