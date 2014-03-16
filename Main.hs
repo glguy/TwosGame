@@ -46,22 +46,22 @@ cellWidth       = 4
 
 -- 90% chance for 2, 10% for 4
 newElementDistribution :: [Int]
-newElementDistribution = 2 : replicate 9 1
+newElementDistribution = 4 : replicate 9 2
 
 -- Picked looking at http://en.wikipedia.org/wiki/File:Xterm_256color_chart.svg
 palette        :: Int -> Color
-palette 0       = White
-palette 1       = ColorNumber 190
-palette 2       = ColorNumber 226
-palette 3       = ColorNumber 220
-palette 4       = ColorNumber 214
-palette 5       = ColorNumber 208
-palette 6       = ColorNumber 202
-palette 7       = ColorNumber 196
-palette 8       = ColorNumber 199
-palette 9       = ColorNumber 57
-palette 10      = ColorNumber 55
-palette _       = ColorNumber 53
+palette    0    = White
+palette    2    = ColorNumber 190
+palette    4    = ColorNumber 226
+palette    8    = ColorNumber 220
+palette   16    = ColorNumber 214
+palette   32    = ColorNumber 208
+palette   64    = ColorNumber 202
+palette  128    = ColorNumber 196
+palette  256    = ColorNumber 199
+palette  512    = ColorNumber 57
+palette 1024    = ColorNumber 55
+palette    _    = ColorNumber 53
 
 ------------------------------------------------------------------------
 -- Board implementation
@@ -95,8 +95,8 @@ newGame tiles   = loop tiles Game { _rows = emptyRows, _score = 0, _delta = 0 }
 collapseRow    :: Row -> Writer (Sum Int) Row
 collapseRow     = fmap (take boardSize) . merge . filter (/=0)
   where
-  merge (x:y:xs) | x == y = do tell (Sum (2^(x+1)))
-                               (x+1 :) <$> merge xs
+  merge (x:y:xs) | x == y = do tell (Sum (x*2))
+                               (x*2 :) <$> merge xs
   merge (x:xs)            = do (x   :) <$> merge xs
   merge []                = do return (repeat 0)
 
@@ -180,9 +180,11 @@ boardPrinter term = print1
 
   print1 b      = runTermOutput term
                 $ cls boardSize
-               <> scoreLine b <> nl
+               <> scoreLine b                   <> nl
                <> foldMapOf (rows.each) drawRow b
-               <> termText "(h) left (j) down (k) up (l) right (q) quit" <> nl
+               <> termText "(h) left (l) right" <> nl
+               <> termText "(j) down (k) up"    <> nl
+               <> termText "(q) quit"           <> nl
 
   drawRow  row  = foldMap drawCell_ row <> nl
                <> foldMap drawCell  row <> nl
@@ -191,7 +193,7 @@ boardPrinter term = print1
   drawCell  cell = bg (palette cell) (termText (pad (cellString cell)))
 
   cellString 0  = ""
-  cellString i  = show (2^i::Int)
+  cellString i  = show i
 
   pad x         = replicate (cellWidth - length x) ' ' ++ x
 
