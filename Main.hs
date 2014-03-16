@@ -41,6 +41,9 @@ startingTiles   = 2
 boardSize      :: Int
 boardSize       = 4
 
+cellWidth      :: Int
+cellWidth       = 4
+
 -- 90% chance for 2, 10% for 4
 newElementDistribution :: [Int]
 newElementDistribution = 2 : replicate 9 1
@@ -181,13 +184,16 @@ boardPrinter term = print1
                <> foldMapOf (rows.each) drawRow b
                <> termText "(h) left (j) down (k) up (l) right (q) quit" <> nl
 
-  drawRow  row  = foldMap drawCell row <> nl
-  drawCell cell = bg (palette cell) (termText (pad (cellString cell)))
+  drawRow  row  = foldMap drawCell_ row <> nl
+               <> foldMap drawCell  row <> nl
+
+  drawCell_ cell = bg (palette cell) (termText (replicate cellWidth ' '))
+  drawCell  cell = bg (palette cell) (termText (pad (cellString cell)))
 
   cellString 0  = ""
   cellString i  = show (2^i::Int)
 
-  pad x         = replicate (4 - length x) ' ' ++ x
+  pad x         = replicate (cellWidth - length x) ' ' ++ x
 
   scoreLine b   = termText ("Score: " ++ show (view score b) ++ deltaText (view delta b))
 
