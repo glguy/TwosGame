@@ -5,7 +5,7 @@ module Main (main) where
 
 import "base"           Control.Concurrent (threadDelay)
 import "base"           Control.Monad (when)
-import "base"           Data.Functor ((<$>))
+import "base"           Data.Functor ((<$>),(<$))
 import "base"           Data.List (intersperse, intercalate, transpose, unfoldr)
 import "base"           Data.Maybe (fromMaybe)
 import "base"           Data.Monoid (Monoid, (<>), Sum(..), mconcat)
@@ -115,7 +115,7 @@ addElement b    = do k <- randomElement (toListOf emptyIndexes b)
 -- Animated cell collapse logic
 ------------------------------------------------------------------------
 
-data Cell = Changed Int | Original Int | Blank deriving (Eq)
+data Cell = Changed Int | Original Int | Blank
 
 toCell                 :: Int -> Cell
 toCell 0                = Blank
@@ -126,22 +126,26 @@ fromCell (Changed  x)   = x
 fromCell (Original x)   = x
 fromCell Blank          = 0
 
--- Monoid meaning: Nothing      - No change
---                 Just (Sum d) - Change worth d
-collapseRow   :: [Cell] -> Writer (Maybe (Sum Int)) [Cell]
+-- Accumulator meaning:
+--   Nothing      - No change
+--   Just (Sum d) - Change worth d
+type TrackChangesM      = Writer (Maybe (Sum Int))
 
-collapseRow (Original x : Original y : xs)
-    | x == y            = do tell (Just (Sum (x*2)))
-                             return (Changed (x*2) : xs ++ [Blank])
+saveChange             :: Int -> TrackChangesM ()
+saveChange              = tell . Just . Sum
 
-collapseRow (Blank : x : xs)
-    | x /= Blank        = do tell (Just (Sum 0))
-                             return (x:xs++[Blank])
-
+collapseRow            :: [Cell] -> TrackChangesM [Cell]
+collapseRow (Original x : Original y : z) | x == y
+                        = let x' = x*2
+                              z' = Changed x' : z ++ [Blank]
+                          in  z' <$ saveChange x'
+collapseRow (Blank : Original y : z)
+                        = let z' = Original y : z ++ [Blank]
+                          in  z' <$ saveChange 0
 collapseRow (x : xs)    = (x :) <$> collapseRow xs
 collapseRow []          = return []
 
-collapseOf :: LensLike' (Writer (Maybe (Sum Int))) [[Cell]] [Cell] -> Game -> [Game]
+collapseOf             :: LensLike' TrackChangesM [[Cell]] [Cell] -> Game -> [Game]
 collapseOf l b          = unfoldr step (0, map (map toCell) (view rows b))
   where
   step (n,rs)           = do let (rs1, mbDelta) = runWriter (l collapseRow rs)
