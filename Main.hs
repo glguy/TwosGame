@@ -26,7 +26,7 @@ import "transformers"   Control.Monad.Trans.Writer
 import "lens"     Control.Lens
     (LensLike, LensLike',
      Traversal', traverseOf, indexing, elementOf, each,
-     Lens', (<&>), set, over, view, _1,
+     Lens', set, over, view, _1,
      Iso, Iso', iso, auf, involuted, reversed,
      asIndex, only, toListOf, cons)
 
@@ -101,13 +101,13 @@ addElement b    = do k <- randomElt (emptyIndexes b)
 data Game       = Game { _board :: Board, _score, _delta :: Int }
 
 board          :: Lens' Game Board
-board f x       = f (_board x) <&> \b -> x { _board = b }
+board f x       = fmap (\b -> x { _board = b }) (f (_board x))
 
 score          :: Lens' Game Int
-score f x       = f (_score x) <&> \b -> x { _score = b }
+score f x       = fmap (\s -> x { _score = s }) (f (_score x))
 
 delta          :: Lens' Game Int
-delta f x       = f (_delta x) <&> \d -> x { _delta = d }
+delta f x       = fmap (\d -> x { _delta = d }) (f (_delta x))
 
 newGame        :: Int -> IO Game
 newGame tiles   = do b <- timesM tiles addElement emptyBoard
