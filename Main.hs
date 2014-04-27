@@ -1,12 +1,10 @@
 {-# OPTIONS_GHC -Wall #-} -- useful for example code
 {-# LANGUAGE PackageImports #-} -- useful for example code
-{-# LANGUAGE TemplateHaskell #-}
 module Main (main) where
 
 import "base"           Control.Concurrent (threadDelay)
 import "base"           Control.Monad (when)
-import "base"           Data.Functor ((<$>),(<$))
-import "base"           Data.List (intersperse, intercalate, transpose, unfoldr)
+import "base"           Data.List (intersperse, transpose, unfoldr)
 import "base"           Data.Maybe (fromMaybe)
 import "base"           Data.Monoid (Monoid, (<>), Sum(..), mconcat)
 import "base"           System.IO
@@ -26,10 +24,11 @@ import "transformers"   Control.Monad.IO.Class (MonadIO(liftIO))
 import "transformers"   Control.Monad.Trans.Writer
 
 import "lens"     Control.Lens
-    (Fold, LensLike', Traversal', Iso',
-     asIndex, each, elementOf, indexing,
-     involuted, makeLenses, only, reversed,
-     set, toListOf, view)
+    (LensLike, LensLike',
+     Traversal', traverseOf, indexing, elementOf, each,
+     Lens', (<&>), set, over, view, _1,
+     Iso, Iso', iso, auf, involuted, reversed,
+     asIndex, only, toListOf, cons)
 
 ------------------------------------------------------------------------
 -- Parameters
@@ -79,37 +78,68 @@ palette    _    = ColorNumber 53
 --       , [_,_,_,_]
 --       , [_,_,_,_]
 --       ]
-type Row        = [Int]
-data Game       = Game { _rows :: [Row], _score, _delta :: Int }
-makeLenses ''Game
+type Board      = [[Int]]
 
-emptyRows      :: [Row]
-emptyRows       = replicate boardSize (replicate boardSize 0)
+boardCells     :: Traversal' Board Int
+boardCells      = each . each
 
-cells          :: Traversal' Game Int
-cells           = rows . each . each
+emptyBoard     :: Board
+emptyBoard      = replicate boardSize (replicate boardSize 0)
 
-emptyIndexes   :: Fold Game Int
-emptyIndexes    = indexing cells . only 0 . asIndex
+emptyIndexes   :: Board -> [Int]
+emptyIndexes    = toListOf (indexing boardCells . only 0 . asIndex)
+
+addElement     :: MonadIO io => Board -> io Board
+addElement b    = do k <- randomElt (emptyIndexes b)
+                     v <- randomElt newElementDistribution
+                     return (set (elementOf boardCells k) v b)
+
+------------------------------------------------------------------------
+-- Game state
+------------------------------------------------------------------------
+
+data Game       = Game { _board :: Board, _score, _delta :: Int }
+
+board          :: Lens' Game Board
+board f x       = f (_board x) <&> \b -> x { _board = b }
+
+score          :: Lens' Game Int
+score f x       = f (_score x) <&> \b -> x { _score = b }
+
+delta          :: Lens' Game Int
+delta f x       = f (_delta x) <&> \d -> x { _delta = d }
 
 newGame        :: Int -> IO Game
-newGame tiles   = loop tiles Game { _rows = emptyRows, _score = 0, _delta = 0 }
-  where
-  loop 0 g      = return g
-  loop n g      = loop (n-1) =<< addElement g
+newGame tiles   = do b <- timesM tiles addElement emptyBoard
+                     return Game { _board = b, _score = 0, _delta = 0 }
 
+------------------------------------------------------------------------
+-- Various utilities
+------------------------------------------------------------------------
+
+-- | Apply a monadic function to a value the given number of times.
+timesM         :: Monad m => Int -> (a -> m a) -> a -> m a
+timesM 0 _ x    = return x
+timesM n f x    = timesM (n-1) f =<< f x
+
+-- | Select a random element from a list. List must not be empty.
+randomElt      :: MonadIO io => [a] -> io a
+randomElt []    = error "randomElement: No elements"
+randomElt xs    = do i <- liftIO (randomRIO (0, length xs - 1))
+                     return (xs!!i)
+
+-- | Map a function over a structure and collect a summary value.
+mapAccumOf     :: LensLike (Writer w) s t a b -> (a -> (b, w)) -> s -> (t, w)
+mapAccumOf      = auf written
+
+-- | Writer is isomorphic to a pair.
+written        :: Iso (a,w) (b,w) (Writer w a) (Writer w b)
+written         = iso writer runWriter
+
+-- | Lists of lists are isomorphic to their transpose when all inner lists
+-- have the same length (as is the case in our board representation).
 transposed     :: Iso' [[a]] [[a]]
 transposed      = involuted transpose
-
-randomElement  :: MonadIO io => [a] -> io a
-randomElement [] = error "randomElement: No elements"
-randomElement xs = do i <- liftIO (randomRIO (0, length xs - 1))
-                      return (xs!!i)
-
-addElement     :: MonadIO io => Game -> io Game
-addElement b    = do k <- randomElement (toListOf emptyIndexes b)
-                     v <- randomElement newElementDistribution
-                     return (set (elementOf cells k) v b)
 
 ------------------------------------------------------------------------
 -- Animated cell collapse logic
@@ -128,40 +158,40 @@ fromCell Blank          = 0
 
 -- Accumulator meaning:
 --   Nothing      - No change
---   Just (Sum d) - Change worth d
-type TrackChangesM      = Writer (Maybe (Sum Int))
+--   Just (Sum d) - Change worth 'd' point
+type Change             = Maybe (Sum Int)
+change                 :: Int -> Change
+change                  = Just . Sum
 
-saveChange             :: Int -> TrackChangesM ()
-saveChange              = tell . Just . Sum
-
-collapseRow            :: [Cell] -> TrackChangesM [Cell]
+collapseRow            :: [Cell] -> ([Cell], Change)
 collapseRow (Original x : Original y : z) | x == y
-                        = let x' = x*2
+                        = let x' = 2*x
                               z' = Changed x' : z ++ [Blank]
-                          in  z' <$ saveChange x'
+                          in  (z', change x')
 collapseRow (Blank : Original y : z)
                         = let z' = Original y : z ++ [Blank]
-                          in  z' <$ saveChange 0
-collapseRow (x : xs)    = (x :) <$> collapseRow xs
-collapseRow []          = return []
+                          in  (z', change 0)
+collapseRow (x : xs)    = over _1 (cons x) (collapseRow xs)
+collapseRow []          = ([], Nothing)
 
-collapseOf             :: LensLike' TrackChangesM [[Cell]] [Cell] -> Game -> [Game]
-collapseOf l b          = unfoldr step (0, map (map toCell) (view rows b))
+collapseOf             :: LensLike' (Writer Change) [[Cell]] [Cell] -> Game -> [Game]
+collapseOf l game       = unfoldr step (0, map (map toCell) (view board game))
   where
-  step (n,rs)           = do let (rs1, mbDelta) = runWriter (l collapseRow rs)
+  step (n,rs)           = do let (rs', mbDelta) = mapAccumOf l collapseRow rs
                              Sum d <- mbDelta
-                             let n1 = n + d
-                                 b1 = Game { _rows  = map (map fromCell) rs1
-                                           , _score = _score b + n1
-                                           , _delta = n1
+                             let n' = n + d
+                                 game' = Game
+                                           { _board = map (map fromCell) rs'
+                                           , _score = _score game + n'
+                                           , _delta = n'
                                            }
-                             return (b1,(n1,rs1))
+                             return (game',(n',rs'))
 
 collapseUp, collapseDown, collapseLeft, collapseRight :: Game -> [Game]
-collapseUp     = collapseOf (transposed . each           )
-collapseDown   = collapseOf (transposed . each . reversed)
-collapseLeft   = collapseOf (             each           )
-collapseRight  = collapseOf (             each . reversed)
+collapseUp      = collapseOf (transposed . each           )
+collapseDown    = collapseOf (transposed . each . reversed)
+collapseLeft    = collapseOf (             each           )
+collapseRight   = collapseOf (             each . reversed)
 
 ------------------------------------------------------------------------
 -- Game logic
@@ -190,7 +220,7 @@ gameLogic       = construct . loop
 
                      if null bs then loop b else slowly bs
 
-  slowly [x]    = loop =<< addElement x
+  slowly [x]    = loop =<< traverseOf board addElement x
   slowly (x:xs) = do yield x
                      liftIO (threadDelay delay)
                      slowly xs
@@ -226,7 +256,8 @@ boardPrinter term = print1
   print1 b      = runTermOutput term
                 $ cls boardSize
                <> scoreLine b
-               <> sandwich topLine midLine botLine drawRow (view rows b)
+               <> sandwich topLine midLine botLine
+                    (map drawRow (view board b))
                <> usageText
 
   -- Metadata
@@ -242,10 +273,10 @@ boardPrinter term = print1
                <> termText "(q) quit"           <> nl
 
   -- Row drawing
-  drawRow       = rowAux drawCell_
-               <> rowAux drawCell
+  drawRow       = rowSandwich . map drawCell_
+               <> rowSandwich . map drawCell
 
-  rowAux        = sandwich sideLine innerLine (sideLine <> nl)
+  rowSandwich   = sandwich sideLine innerLine (sideLine <> nl)
 
   -- Cell drawing
   drawCell_ cell = cellText cell (replicate cellWidth ' ')
@@ -261,15 +292,15 @@ boardPrinter term = print1
   midLine       = horiz '┠' '─' '┼' '┨'
   botLine       = horiz '┗' '━' '┷' '┛'
   horiz a b c d = lineText
-                $ [a]
-               <> intercalate [c] (replicate boardSize (replicate cellWidth b))
-               <> [d,'\n']
+                $ sandwich [a] [c] [d,'\n']
+                $ replicate boardSize
+                $ replicate cellWidth b
 
   -- Utilities
   pad x         = replicate (cellWidth - length x) ' ' <> x
 
-  sandwich           :: Monoid b => b -> b -> b -> (a -> b) -> [a] -> b
-  sandwich l m r f xs = l <> mconcat (intersperse m (map f xs)) <> r
+  sandwich     :: Monoid b => b -> b -> b -> [b] -> b
+  sandwich l m r xs = l <> mconcat (intersperse m xs) <> r
 
 
 main           :: IO ()
