@@ -157,18 +157,19 @@ initLast xs     | null xs   = Nothing
 ------------------------------------------------------------------------
 
 -- | Type for tracking incremental updates to the board.
-data Cell = Changed Int   -- ^ Cell which has been updated this move
-          | Original Int  -- ^ Cell which has not been updated this move
-          | Blank         -- ^ Cell which is empty
+data Cell       = Changed Int   -- ^ Cell which has been updated this move
+                | Original Int  -- ^ Cell which has not been updated this move
+                | Blank         -- ^ Cell which is empty
 
-toCell                 :: Int -> Cell
-toCell 0                = Blank
-toCell n                = Original n
+toCell         :: Int -> Cell
+toCell 0        = Blank
+toCell n        = Original n
 
 fromCell               :: Cell -> Int
-fromCell (Changed  x)   = x
-fromCell (Original x)   = x
-fromCell Blank          = 0
+fromCell c      = case c of
+                    Changed  x -> x
+                    Original x -> x
+                    Blank      -> 0
 
 -- | Accumulator meaning:
 --   Nothing      - No change
@@ -200,7 +201,7 @@ collapseRow []  = ([], Nothing)
 
 ---
 
-collapseOf             :: LensLike' (Writer Change) [[Cell]] [Cell] -> Game -> [Game]
+collapseOf     :: LensLike' (Writer Change) [[Cell]] [Cell] -> Game -> [Game]
 collapseOf l g  = unfoldr step (0, map (map toCell) (view board g))
   where
   step (n,rs)   = do let (rs', mbDelta) = mapAccumOf l collapseRow rs
