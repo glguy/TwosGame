@@ -4,6 +4,7 @@ module Main (main) where
 
 import "base"           Control.Concurrent (threadDelay)
 import "base"           Control.Monad (when)
+import "base"           Data.Foldable (traverse_)
 import "base"           Data.List (intersperse, transpose, unfoldr)
 import "base"           Data.Maybe (fromMaybe)
 import "base"           Data.Monoid (Monoid, (<>), Sum(..), mconcat)
@@ -12,7 +13,7 @@ import "base"           System.IO
                            hSetBuffering, hSetEcho,
                            stdin)
 import "machines"       Data.Machine
-                          (Process, ProcessT,
+                          (PlanT, Process, ProcessT,
                            (~>), autoM, await, construct, repeatedly,
                            runT_, stop, yield)
 import "random"         System.Random (randomRIO)
@@ -98,7 +99,10 @@ addElement b    = do k <- randomElt (emptyIndexes b)
 -- Game state
 ------------------------------------------------------------------------
 
-data Game       = Game { _board :: Board, _score, _delta :: Int }
+data Game       = Game { _board         :: Board
+                       , _score, _delta :: Int
+                       , _previous      :: Maybe Game
+                       }
 
 board          :: Lens' Game Board
 board f x       = fmap (\b -> x { _board = b }) (f (_board x))
@@ -109,9 +113,12 @@ score f x       = fmap (\s -> x { _score = s }) (f (_score x))
 delta          :: Lens' Game Int
 delta f x       = fmap (\d -> x { _delta = d }) (f (_delta x))
 
+previous       :: Lens' Game (Maybe Game)
+previous f x    = fmap (\d -> x { _previous = d }) (f (_previous x))
+
 newGame        :: Int -> IO Game
 newGame tiles   = do b <- timesM tiles addElement emptyBoard
-                     return Game { _board = b, _score = 0, _delta = 0 }
+                     return (Game b 0 0 Nothing)
 
 ------------------------------------------------------------------------
 -- Various utilities
@@ -141,11 +148,18 @@ written         = iso writer runWriter
 transposed     :: Iso' [[a]] [[a]]
 transposed      = involuted transpose
 
+initLast       :: [a] -> Maybe ([a], a)
+initLast xs     | null xs   = Nothing
+                | otherwise = Just (init xs, last xs)
+
 ------------------------------------------------------------------------
 -- Animated cell collapse logic
 ------------------------------------------------------------------------
 
-data Cell = Changed Int | Original Int | Blank
+-- | Type for tracking incremental updates to the board.
+data Cell = Changed Int   -- ^ Cell which has been updated this move
+          | Original Int  -- ^ Cell which has not been updated this move
+          | Blank         -- ^ Cell which is empty
 
 toCell                 :: Int -> Cell
 toCell 0                = Blank
@@ -156,90 +170,115 @@ fromCell (Changed  x)   = x
 fromCell (Original x)   = x
 fromCell Blank          = 0
 
--- Accumulator meaning:
+-- | Accumulator meaning:
 --   Nothing      - No change
 --   Just (Sum d) - Change worth 'd' point
-type Change             = Maybe (Sum Int)
-change                 :: Int -> Change
-change                  = Just . Sum
+type Change     = Maybe (Sum Int)
 
-collapseRow            :: [Cell] -> ([Cell], Change)
+change         :: Int -> Change
+change          = Just . Sum
+
+---
+
+-- | Compute a single step reduction and report if a change occurred
+-- and the changes corresponding value.
+collapseRow    :: [Cell] -> ([Cell], Change)
+
 collapseRow (Original x : Original y : z) | x == y
-                        = let x' = 2*x
-                              z' = Changed x' : z ++ [Blank]
-                          in  (z', change x')
+                = let x' = 2 * x
+                      z' = [Changed x'] ++ z ++ [Blank]
+                  in  (z', change x')
+
 collapseRow (Blank : Original y : z)
-                        = let z' = Original y : z ++ [Blank]
-                          in  (z', change 0)
-collapseRow (x : xs)    = over _1 (cons x) (collapseRow xs)
-collapseRow []          = ([], Nothing)
+                = let z' = [Original y] ++ z ++ [Blank]
+                  in  (z', change 0)
+
+collapseRow (x : xs)
+                = over _1 (cons x) (collapseRow xs)
+
+collapseRow []  = ([], Nothing)
+
+---
 
 collapseOf             :: LensLike' (Writer Change) [[Cell]] [Cell] -> Game -> [Game]
-collapseOf l game       = unfoldr step (0, map (map toCell) (view board game))
+collapseOf l g  = unfoldr step (0, map (map toCell) (view board g))
   where
-  step (n,rs)           = do let (rs', mbDelta) = mapAccumOf l collapseRow rs
-                             Sum d <- mbDelta
-                             let n' = n + d
-                                 game' = Game
-                                           { _board = map (map fromCell) rs'
-                                           , _score = _score game + n'
-                                           , _delta = n'
-                                           }
-                             return (game',(n',rs'))
+  step (n,rs)   = do let (rs', mbDelta) = mapAccumOf l collapseRow rs
+                     Sum d <- mbDelta
+                     let n' = n + d
+                         update = set  delta n'
+                                . over score (+n')
+                                . set  board (map (map fromCell) rs')
+                     return (update g,(n',rs'))
 
-collapseUp, collapseDown, collapseLeft, collapseRight :: Game -> [Game]
-collapseUp      = collapseOf (transposed . each           )
-collapseDown    = collapseOf (transposed . each . reversed)
-collapseLeft    = collapseOf (             each           )
-collapseRight   = collapseOf (             each . reversed)
+rowsUp, rowsDown, rowsLeft, rowsRight :: Traversal' [[a]] [a]
+rowsUp          = transposed . each
+rowsDown        = transposed . each . reversed
+rowsLeft        =              each
+rowsRight       =              each . reversed
 
 ------------------------------------------------------------------------
 -- Game logic
 ------------------------------------------------------------------------
 
 data Direction = U | D | L | R
+data Command   = Undo | Move Direction
 
-gameLogic      :: Game -> ProcessT IO Direction Game
+gameLogic      :: Game -> ProcessT IO Command Game
 gameLogic       = construct . loop
   where
-  loop b        = do yield b
+  loop g        = do yield g
+                     cmd <- await
+                     handleCmd g cmd
 
-                     let bl = collapseLeft  b
-                         br = collapseRight b
-                         bd = collapseDown  b
-                         bu = collapseUp    b
+  handleCmd g Undo
+                = case view previous g of
+                    Nothing -> loop g
+                    Just g' -> loop g'
 
-                     when (all null [bl, br, bd, bu]) stop
+  handleCmd g (Move dir)
+                = do let gl = collapseOf rowsLeft  g
+                         gr = collapseOf rowsRight g
+                         gd = collapseOf rowsDown  g
+                         gu = collapseOf rowsUp    g
 
-                     c <- await
-                     let bs = case c of
-                                L -> bl
-                                R -> br
-                                D -> bd
-                                U -> bu
+                     when (all null [gl, gu]) stop
 
-                     if null bs then loop b else slowly bs
+                     let animation = case dir of
+                             L -> gl
+                             R -> gr
+                             D -> gd
+                             U -> gu
 
-  slowly [x]    = loop =<< traverseOf board addElement x
-  slowly (x:xs) = do yield x
-                     liftIO (threadDelay delay)
-                     slowly xs
-  slowly []     = error "slowly: impossible"
+                     case initLast animation of
+                       Nothing     -> loop g
+                       Just (xs,x) ->
+                         do yieldSlowly xs
+                            g' <- traverseOf board addElement x
+                            let g'' = set previous (Just g) g'
+                            loop g''
+
+yieldSlowly    :: [o] -> PlanT k o IO ()
+yieldSlowly     = traverse_ $ \x ->
+                    do yield x
+                       liftIO (threadDelay delay)
+
 
 ------------------------------------------------------------------------
 -- Run game using terminal sources
 ------------------------------------------------------------------------
 
-vimBindings    :: Process Char Direction
+vimBindings    :: Process Char Command
 vimBindings     = repeatedly process1
   where
   process1      = do c <- await
                      case c of
-                       'j' -> yield D
-                       'k' -> yield U
-                       'h' -> yield L
-                       'l' -> yield R
+                       'j' -> yield (Move D)
+                       'k' -> yield (Move U)
+                       'h' -> yield (Move L)
+                       'l' -> yield (Move R)
                        'q' -> stop
+                       '`' -> yield Undo
                        _   -> return () -- ignore
 
 boardPrinter  :: Terminal -> Game -> IO ()
@@ -270,7 +309,7 @@ boardPrinter term = print1
 
   usageText     = termText "(h) left (l) right" <> nl
                <> termText "(j) down (k) up"    <> nl
-               <> termText "(q) quit"           <> nl
+               <> termText "(`) undo (q) quit"  <> nl
 
   -- Row drawing
   drawRow       = rowSandwich . map drawCell_
@@ -302,6 +341,9 @@ boardPrinter term = print1
   sandwich     :: Monoid b => b -> b -> b -> [b] -> b
   sandwich l m r xs = l <> mconcat (intersperse m xs) <> r
 
+------------------------------------------------------------------------
+-- Tie it all together!
+------------------------------------------------------------------------
 
 main           :: IO ()
 main            = do hSetBuffering stdin NoBuffering
