@@ -195,7 +195,7 @@ collapseRow []  = (Nothing, [])
 collapseOf     :: LensLike' ((,) Change) [[Cell]] [Cell] -> Game -> [Game]
 collapseOf l g  = unfoldr step (0, map (map toCell) (view board g))
   where
-  step (n,rs)   = do let (mbDelta, rs') = l collapseRow rs
+  step (n,rs)   = do let (mbDelta, rs') = traverseOf l collapseRow rs
                      Sum d <- mbDelta
                      let n' = n + d
                          update = set  delta n'
