@@ -22,13 +22,12 @@ import "terminfo"       System.Console.Terminfo
                            runTermOutput, setupTermFromEnv, newline, termText,
                            withBackgroundColor)
 import "transformers"   Control.Monad.IO.Class (MonadIO(liftIO))
-import "transformers"   Control.Monad.Trans.Writer
 
 import "lens"     Control.Lens
-    (LensLike, LensLike',
+    (LensLike',
      Traversal', traverseOf, indexing, elementOf, each,
-     Lens', set, over, view, _1,
-     Iso, Iso', iso, auf, involuted, reversed,
+     Lens', set, over, view,
+     Iso', involuted, reversed,
      asIndex, only, toListOf, cons)
 
 ------------------------------------------------------------------------
@@ -135,14 +134,6 @@ randomElt []    = error "randomElement: No elements"
 randomElt xs    = do i <- liftIO (randomRIO (0, length xs - 1))
                      return (xs!!i)
 
--- | Map a function over a structure and collect a summary value.
-mapAccumOf     :: LensLike (Writer w) s t a b -> (a -> (b, w)) -> s -> (t, w)
-mapAccumOf      = auf written
-
--- | Writer is isomorphic to a pair.
-written        :: Iso (a,w) (b,w) (Writer w a) (Writer w b)
-written         = iso writer runWriter
-
 -- | Lists of lists are isomorphic to their transpose when all inner lists
 -- have the same length (as is the case in our board representation).
 transposed     :: Iso' [[a]] [[a]]
@@ -183,28 +174,28 @@ change          = Just . Sum
 
 -- | Compute a single step reduction and report if a change occurred
 -- and the changes corresponding value.
-collapseRow    :: [Cell] -> ([Cell], Change)
+collapseRow    :: [Cell] -> (Change, [Cell])
 
 collapseRow (Original x : Original y : z) | x == y
                 = let x' = 2 * x
                       z' = [Changed x'] ++ z ++ [Blank]
-                  in  (z', change x')
+                  in  (change x', z')
 
 collapseRow (Blank : Original y : z)
                 = let z' = [Original y] ++ z ++ [Blank]
-                  in  (z', change 0)
+                  in  (change 0, z')
 
 collapseRow (x : xs)
-                = over _1 (cons x) (collapseRow xs)
+                = fmap (cons x) (collapseRow xs)
 
-collapseRow []  = ([], Nothing)
+collapseRow []  = (Nothing, [])
 
 ---
 
-collapseOf     :: LensLike' (Writer Change) [[Cell]] [Cell] -> Game -> [Game]
+collapseOf     :: LensLike' ((,) Change) [[Cell]] [Cell] -> Game -> [Game]
 collapseOf l g  = unfoldr step (0, map (map toCell) (view board g))
   where
-  step (n,rs)   = do let (rs', mbDelta) = mapAccumOf l collapseRow rs
+  step (n,rs)   = do let (mbDelta, rs') = l collapseRow rs
                      Sum d <- mbDelta
                      let n' = n + d
                          update = set  delta n'
