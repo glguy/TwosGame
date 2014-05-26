@@ -234,7 +234,7 @@ gameLogic       = construct . loop
                          gd = collapseOf rowsDown  g
                          gu = collapseOf rowsUp    g
 
-                     when (all null [gl, gu]) stop
+                     when (all null [gr, gd, gl, gu]) stop
 
                      let animation = case dir of
                              L -> gl
