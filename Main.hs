@@ -21,7 +21,7 @@ import "terminfo"       System.Console.Terminfo
                           (Color(..), Terminal, clearScreen, getCapability,
                            runTermOutput, setupTermFromEnv, newline, termText,
                            withBackgroundColor)
-import "transformers"   Control.Monad.IO.Class (MonadIO(liftIO))
+import                  Control.Monad.IO.Class (MonadIO(liftIO))
 
 import "lens"     Control.Lens
     (LensLike',
