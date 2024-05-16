@@ -15,7 +15,7 @@ cabal-version:       >=1.10
 executable TwosGame
   main-is:             Main.hs
   other-extensions:    PackageImports, TemplateHaskell
-  build-depends:       base >=4.6 && <4.10,
+  build-depends:       base >=4.6 && <4.21,
                        terminfo >= 0.3,
                        lens     >= 4.0.7,
                        machines >= 0.2.5,
